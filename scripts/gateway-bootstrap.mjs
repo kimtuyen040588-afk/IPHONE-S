@@ -46,6 +46,19 @@ async function commandExists(command, args = ['--version']) {
     return run(command, args, { stdio: ['ignore', 'ignore', 'ignore'] });
 }
 
+async function fullXcodeInstalled() {
+    const result = await capture('/usr/bin/xcodebuild', ['-version']);
+    return result.ok && /^Xcode\s+\d/m.test(result.output);
+}
+
+async function dockerInstalled() {
+    return commandExists('docker', ['--version']);
+}
+
+async function dockerRunning() {
+    return commandExists('docker', ['info', '--format', '{{.ServerVersion}}']);
+}
+
 async function envHasTeam() {
     try {
         const body = await readFile(path.join(root, '.env'), 'utf8');
@@ -62,13 +75,26 @@ async function signingStatus() {
 }
 
 async function status() {
-    const [xcode, docker, driver, apple] = await Promise.all([
-        commandExists('xcode-select', ['-p']),
-        commandExists('docker', ['compose', 'version']),
+    const [xcode, dockerApp, docker, driver, apple] = await Promise.all([
+        fullXcodeInstalled(),
+        dockerInstalled(),
+        dockerRunning(),
         exists(path.join(root, '.appium2/node_modules/appium-xcuitest-driver')),
         signingStatus(),
     ]);
-    return { mac: process.platform === 'darwin', node: Number(process.versions.node.split('.')[0]) >= 22, xcode, docker, driver, apple };
+    return {
+        mac: process.platform === 'darwin',
+        node: Number(process.versions.node.split('.')[0]) >= 22,
+        xcode,
+        docker,
+        driver,
+        apple,
+        environment: {
+            xcode: xcode ? 'ready' : 'missing',
+            docker: docker ? 'ready' : dockerApp ? 'not-running' : 'missing',
+            driver: driver ? 'ready' : 'missing',
+        },
+    };
 }
 
 async function doctor() {
@@ -128,13 +154,41 @@ async function install() {
     console.log('\n✓ 这台 Mac 的网关已准备好。请在 Xcode 官方界面登录 Apple 开发者账号，再连接第一台 iPhone。');
 }
 
-if (!['doctor', 'install', 'status'].includes(action)) {
-    console.error('用法：node scripts/gateway-bootstrap.mjs doctor | install | status');
+async function prepareEnvironment() {
+    const current = await status();
+    console.log('\n环境助手正在处理…');
+    if (!current.xcode) {
+        console.log('• 缺少完整 Xcode：已打开 Apple 官方下载页。安装完成后回到本程序点“重新检查”。');
+        await run('/usr/bin/open', ['https://developer.apple.com/xcode/']);
+    } else {
+        console.log('✓ Xcode 已就绪');
+    }
+    if (current.environment.docker === 'missing') {
+        console.log('• 缺少 Docker Desktop：已打开 Docker 官方下载页。安装后请启动一次 Docker。');
+        await run('/usr/bin/open', ['https://www.docker.com/products/docker-desktop/']);
+    } else if (current.environment.docker === 'not-running') {
+        console.log('• Docker 已安装但尚未启动：正在为你打开 Docker。等菜单栏图标显示运行后，再点“重新检查”。');
+        await run('/usr/bin/open', ['-a', 'Docker']);
+    } else {
+        console.log('✓ Docker Desktop 已运行');
+    }
+    if (!current.driver) {
+        console.log('• 内置 iPhone 控制驱动不完整。请重新下载完整的网关安装包；它本来会随程序一起带好。');
+    } else {
+        console.log('✓ iPhone 控制驱动已就绪');
+    }
+    console.log('\n已处理能自动处理的项目。Apple 和 Docker 的安装确认必须由你在官方界面点一次，这是 macOS 的安全规定。');
+}
+
+if (!['doctor', 'install', 'prepare-environment', 'status'].includes(action)) {
+    console.error('用法：node scripts/gateway-bootstrap.mjs doctor | install | prepare-environment | status');
     process.exitCode = 1;
 } else if (action === 'status') {
     console.log(JSON.stringify(await status()));
 } else if (action === 'doctor') {
     if (!await doctor()) process.exitCode = 1;
+} else if (action === 'prepare-environment') {
+    await prepareEnvironment();
 } else {
     await install();
 }

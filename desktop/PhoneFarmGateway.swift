@@ -13,8 +13,15 @@ struct GatewayStatus: Decodable {
     let docker: Bool
     let driver: Bool
     let apple: AppleSigningStatus
+    let environment: EnvironmentStatus
 
     var macReady: Bool { mac && node && xcode && docker && driver }
+}
+
+struct EnvironmentStatus: Decodable {
+    let xcode: String
+    let docker: String
+    let driver: String
 }
 
 struct UpdateStatus: Decodable {
@@ -170,6 +177,10 @@ final class GatewayModel: ObservableObject {
         }
     }
 
+    func prepareEnvironment() {
+        run("scripts/gateway-bootstrap.mjs", ["prepare-environment"])
+    }
+
     func openConsole() { NSWorkspace.shared.open(URL(string: "http://127.0.0.1:3000")!) }
 }
 
@@ -197,6 +208,8 @@ struct GatewayView: View {
                      detail: "设备接入后，系统会测试连接、截图和恢复能力", button: "启动网关") { model.run("scripts/launch-agent.mjs", ["install"]) }
             HStack {
                 Button("重新检查") { model.refresh() }.buttonStyle(.borderedProminent).disabled(model.working)
+                Button(model.status?.macReady == true ? "检查环境" : "一键补齐环境") { model.prepareEnvironment() }
+                    .disabled(model.working)
                 Button(model.update?.available == true ? "立即更新到 \(model.update?.latest ?? "")" : "检查更新") {
                     if model.update?.available == true { model.installUpdate() } else { model.checkForUpdates() }
                 }.disabled(model.working)
