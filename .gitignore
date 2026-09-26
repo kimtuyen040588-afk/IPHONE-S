@@ -7,6 +7,8 @@ dist/
 devices.json
 .wda/
 .scheduler-data/
+*.previous
+*.previous.older
 static/assets/
 release/
 *.log

@@ -30,6 +30,10 @@ npm run package:mac
 
 当前构建是本机测试签名。面向其他 Mac 发布前，必须使用 Apple Developer ID 签名并通过 Apple 公证（notarization）；否则 macOS 会显示未知开发者警告。
 
+## 程序内更新
+
+网关右下方的“检查更新”只检查本项目 GitHub Releases。它会比对最新版本、下载 ZIP、核对 GitHub 提供的 SHA-256 指纹，并验证 App 的包标识和签名。校验通过后，旧 App 会保留为同目录的 `PhoneFarmGateway.app.previous`，新版本自动打开；它不会从其他网址下载或覆盖其他程序。
+
 有 Developer ID 证书的发布 Mac 可用下面的方式签名：
 
 ```bash

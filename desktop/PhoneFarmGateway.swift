@@ -17,6 +17,13 @@ struct GatewayStatus: Decodable {
     var macReady: Bool { mac && node && xcode && docker && driver }
 }
 
+struct UpdateStatus: Decodable {
+    let available: Bool
+    let current: String
+    let latest: String
+    let message: String
+}
+
 @main
 struct PhoneFarmGatewayApp: App {
     var body: some Scene {
@@ -32,6 +39,10 @@ final class GatewayModel: ObservableObject {
     @Published var output = "正在检查这台 Mac…\n"
     @Published var working = false
     @Published var status: GatewayStatus?
+    @Published var update: UpdateStatus?
+    @Published var updateMessage = ""
+
+    var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0" }
 
     private var root: URL? {
         if let configured = ProcessInfo.processInfo.environment["PHONE_FARM_HOME"], !configured.isEmpty {
@@ -80,7 +91,7 @@ final class GatewayModel: ObservableObject {
         return "\(macMessage)\n\(appleMessage)\n\n每次完成一步，状态会自动更新；你不需要查终端或填写技术编号。"
     }
 
-    func run(_ script: String, _ arguments: [String] = []) {
+    func run(_ script: String, _ arguments: [String] = [], onSuccess: (() -> Void)? = nil) {
         guard let root, let node else { output = "找不到内置网关程序。请重新下载完整安装包。"; return }
         working = true
         output = "正在处理，请稍候…\n"
@@ -101,11 +112,47 @@ final class GatewayModel: ObservableObject {
             pipe.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
                 self?.working = false
-                self?.output += process.terminationStatus == 0 ? "\n完成。\n" : "\n未完成，请按上面的提示处理后重试。\n"
-                self?.refresh()
+                if process.terminationStatus == 0 {
+                    self?.output += "\n完成。\n"
+                    if let onSuccess { onSuccess() } else { self?.refresh() }
+                } else {
+                    self?.output += "\n未完成，请按上面的提示处理后重试。\n"
+                    self?.refresh()
+                }
             }
         }
         do { try task.run() } catch { working = false; output = "无法启动网关程序：\(error.localizedDescription)" }
+    }
+
+    func checkForUpdates() {
+        guard let root, let node else { updateMessage = "找不到更新组件"; return }
+        let currentVersion = appVersion
+        working = true
+        updateMessage = "正在检查更新…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = node
+            process.arguments = [root.appendingPathComponent("scripts/update-gateway.mjs").path, "check", "--current", currentVersion]
+            let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+            do {
+                try process.run(); process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let result = try JSONDecoder().decode(UpdateStatus.self, from: data)
+                DispatchQueue.main.async { self?.update = result; self?.updateMessage = result.message; self?.working = false }
+            } catch {
+                DispatchQueue.main.async { self?.updateMessage = "更新检查失败，请稍后重试"; self?.working = false }
+            }
+        }
+    }
+
+    func installUpdate() {
+        guard let update, update.available else { return }
+        updateMessage = "正在下载并校验 \(update.latest)…"
+        run("scripts/update-gateway.mjs", ["install", "--current", appVersion, "--app-path", Bundle.main.bundlePath, "--pid", String(ProcessInfo.processInfo.processIdentifier)]) {
+            // The verified installer is now waiting for this App to quit, then swaps
+            // the bundle and reopens it.  Do not quit before the download finishes.
+            NSApplication.shared.terminate(nil)
+        }
     }
 
     func openXcode() {
@@ -150,10 +197,14 @@ struct GatewayView: View {
                      detail: "设备接入后，系统会测试连接、截图和恢复能力", button: "启动网关") { model.run("scripts/launch-agent.mjs", ["install"]) }
             HStack {
                 Button("重新检查") { model.refresh() }.buttonStyle(.borderedProminent).disabled(model.working)
+                Button(model.update?.available == true ? "立即更新到 \(model.update?.latest ?? "")" : "检查更新") {
+                    if model.update?.available == true { model.installUpdate() } else { model.checkForUpdates() }
+                }.disabled(model.working)
                 if model.working { ProgressView().controlSize(.small) }
                 Spacer()
                 Text("不确定时只要点“重新检查”。").font(.footnote).foregroundStyle(.secondary)
             }
+            if !model.updateMessage.isEmpty { Text(model.updateMessage).font(.footnote).foregroundStyle(.secondary) }
             TextEditor(text: $model.output).font(.system(.body, design: .monospaced)).padding(8)
                 .frame(minHeight: 90).background(Color(nsColor: .textBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
