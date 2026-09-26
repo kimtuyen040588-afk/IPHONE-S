@@ -13,16 +13,28 @@ function random() { return crypto.randomBytes(32).toString('hex'); }
 
 async function ensureEnv() {
   try {
-    await readFile(envPath, 'utf8');
+    const existing = await readFile(envPath, 'utf8');
+    // Version 0.1.0 generated these two values independently. Repair that
+    // first-installation mistake using the database's existing password so we
+    // never need to remove the database volume.
+    const password = existing.match(/^POSTGRES_PASSWORD=(.+)$/m)?.[1]?.trim();
+    if (password) {
+      const repaired = existing.replace(
+        /^DATABASE_URL=postgresql:\/\/phone_farm_relay:[^@]+@postgres:5432\/phone_farm_relay$/m,
+        `DATABASE_URL=postgresql://phone_farm_relay:${password}@postgres:5432/phone_farm_relay`,
+      );
+      if (repaired !== existing) await writeFile(envPath, repaired, { mode: 0o600 });
+    }
     console.log('Existing relay secrets kept in .env');
     return;
   } catch { /* first installation */ }
+  const postgresPassword = random();
   const value = [
     'PUBLIC_ORIGIN=https://hgykny55888.it.com',
     'PORT=4310',
-    `DATABASE_URL=postgresql://phone_farm_relay:${random()}@postgres:5432/phone_farm_relay`,
+    `DATABASE_URL=postgresql://phone_farm_relay:${postgresPassword}@postgres:5432/phone_farm_relay`,
     `RELAY_CONSOLE_TOKEN=${random()}`,
-    `POSTGRES_PASSWORD=${random()}`,
+    `POSTGRES_PASSWORD=${postgresPassword}`,
     '',
   ].join('\n');
   await writeFile(envPath, value, { mode: 0o600, flag: 'wx' });
