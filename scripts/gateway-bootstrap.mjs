@@ -27,6 +27,17 @@ function run(command, args, options = {}) {
     });
 }
 
+function capture(command, args) {
+    return new Promise((resolve) => {
+        const child = spawn(command, args, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        child.stderr.on('data', (chunk) => { output += chunk; });
+        child.once('error', () => resolve({ ok: false, output }));
+        child.once('exit', (code) => resolve({ ok: code === 0, output }));
+    });
+}
+
 async function exists(target) {
     try { await access(target); return true; } catch { return false; }
 }
@@ -42,14 +53,33 @@ async function envHasTeam() {
     } catch { return false; }
 }
 
+async function signingStatus() {
+    const result = await capture('/usr/bin/security', ['find-identity', '-v', '-p', 'codesigning']);
+    const match = result.output.match(/Apple Development:[^(]+\(([A-Z0-9]{10})\)/);
+    if (match) return { state: 'ready', teamId: match[1], message: 'Apple 开发者账号和签名已就绪' };
+    if (await envHasTeam()) return { state: 'needs-signing', message: '已找到团队设置，但还没有可用的 Apple Development 签名' };
+    return { state: 'needs-login', message: '请在 Xcode → Settings → Accounts 登录 Apple Developer 账号' };
+}
+
+async function status() {
+    const [xcode, docker, driver, apple] = await Promise.all([
+        commandExists('xcode-select', ['-p']),
+        commandExists('docker', ['compose', 'version']),
+        exists(path.join(root, '.appium2/node_modules/appium-xcuitest-driver')),
+        signingStatus(),
+    ]);
+    return { mac: process.platform === 'darwin', node: Number(process.versions.node.split('.')[0]) >= 22, xcode, docker, driver, apple };
+}
+
 async function doctor() {
+    const current = await status();
     const checks = [
-        { label: '这台电脑是 Mac', ok: process.platform === 'darwin', required: true },
-        { label: '内置 Node.js 已就绪', ok: Number(process.versions.node.split('.')[0]) >= 22, required: true },
-        { label: 'Xcode 已安装', ok: await commandExists('xcode-select', ['-p']), required: true },
-        { label: 'Docker Desktop 已启动', ok: await commandExists('docker', ['compose', 'version']), required: true },
-        { label: 'iPhone 控制驱动已准备好', ok: await exists(path.join(root, '.appium2/node_modules/appium-xcuitest-driver')), required: false },
-        { label: 'Apple 开发团队已选择', ok: Boolean(process.env.XCODE_ORG_ID) || await envHasTeam(), required: false },
+        { label: '这台电脑是 Mac', ok: current.mac, required: true },
+        { label: '内置 Node.js 已就绪', ok: current.node, required: true },
+        { label: 'Xcode 已安装', ok: current.xcode, required: true },
+        { label: 'Docker Desktop 已启动', ok: current.docker, required: true },
+        { label: 'iPhone 控制驱动已准备好', ok: current.driver, required: false },
+        { label: current.apple.message, ok: current.apple.state === 'ready', required: false },
     ];
     console.log('\nMac 网关检查结果');
     for (const check of checks) console.log(`${check.ok ? '✓' : '✗'} ${check.label}${!check.ok && check.required ? '（需要处理）' : ''}`);
@@ -58,22 +88,33 @@ async function doctor() {
     return ready;
 }
 
-async function ensureEnv() {
+async function ensureEnv(teamId) {
     const target = path.join(root, '.env');
-    if (await exists(target)) return;
-    const template = await readFile(path.join(root, '.env.example'), 'utf8');
-    const password = randomBytes(24).toString('base64url');
-    const body = template
-        .replace('DATABASE_URL=postgresql://phone_farm:CHANGE_ME@127.0.0.1:5432/phone_farm', `DATABASE_URL=postgresql://phone_farm:${password}@127.0.0.1:5432/phone_farm`)
-        .replace('POSTGRES_PASSWORD=CHANGE_ME', `POSTGRES_PASSWORD=${password}`);
+    let body;
+    if (await exists(target)) body = await readFile(target, 'utf8');
+    else {
+        const template = await readFile(path.join(root, '.env.example'), 'utf8');
+        const password = randomBytes(24).toString('base64url');
+        body = template
+            .replace('DATABASE_URL=postgresql://phone_farm:CHANGE_ME@127.0.0.1:5432/phone_farm', `DATABASE_URL=postgresql://phone_farm:${password}@127.0.0.1:5432/phone_farm`)
+            .replace('POSTGRES_PASSWORD=CHANGE_ME', `POSTGRES_PASSWORD=${password}`);
+    }
+    body = body.replace(/^XCODE_ORG_ID=.*$/m, `XCODE_ORG_ID=${teamId}`);
     await writeFile(target, body, { mode: 0o600 });
     await chmod(target, 0o600);
-    console.log('✓ 已为这台 Mac 创建私有配置文件');
+    console.log('✓ 已保存这台 Mac 的私有配置和 Apple 开发团队');
 }
 
 async function install() {
     if (!await doctor()) { process.exitCode = 1; return; }
-    await ensureEnv();
+    const apple = await signingStatus();
+    if (apple.state !== 'ready') {
+        console.error(`\n还不能继续：${apple.message}`);
+        console.error('请在 Xcode 完成登录后，回到这里点“重新检查”。');
+        process.exitCode = 1;
+        return;
+    }
+    await ensureEnv(apple.teamId);
     if (!await exists(path.join(root, 'node_modules/appium'))) {
         console.log('\n正在准备网关程序，第一次约需几分钟…');
         if (!await run(process.execPath, ['--run', 'npm', 'ci'])) { process.exitCode = 1; return; }
@@ -87,9 +128,11 @@ async function install() {
     console.log('\n✓ 这台 Mac 的网关已准备好。请在 Xcode 官方界面登录 Apple 开发者账号，再连接第一台 iPhone。');
 }
 
-if (!['doctor', 'install'].includes(action)) {
-    console.error('用法：node scripts/gateway-bootstrap.mjs doctor | install');
+if (!['doctor', 'install', 'status'].includes(action)) {
+    console.error('用法：node scripts/gateway-bootstrap.mjs doctor | install | status');
     process.exitCode = 1;
+} else if (action === 'status') {
+    console.log(JSON.stringify(await status()));
 } else if (action === 'doctor') {
     if (!await doctor()) process.exitCode = 1;
 } else {
