@@ -14,6 +14,7 @@ if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const app = Fastify({ logger: true, bodyLimit: 2 * 1024 * 1024 });
+const taskSignals = new Map();
 
 function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -59,6 +60,51 @@ function recipientsFrom(value) {
     throw new Error('Recipients must be unique international-format phone numbers.');
   }
   return unique;
+}
+
+function signalFor(gatewayId) {
+  let signal = taskSignals.get(gatewayId);
+  if (!signal) {
+    signal = { sequence: 0, waiters: new Set() };
+    taskSignals.set(gatewayId, signal);
+  }
+  return signal;
+}
+
+function notifyGateway(gatewayId) {
+  const signal = signalFor(gatewayId);
+  signal.sequence += 1;
+  for (const resolve of signal.waiters) resolve();
+  signal.waiters.clear();
+}
+
+async function waitForTask(gatewayId, observedSequence, timeoutMs = 25_000) {
+  const signal = signalFor(gatewayId);
+  if (signal.sequence !== observedSequence) return;
+  await new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); signal.waiters.delete(finish); resolve(); };
+    const timer = setTimeout(finish, timeoutMs);
+    signal.waiters.add(finish);
+  });
+}
+
+async function leaseNextTask(gatewayId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`UPDATE tasks SET status = 'queued', leased_until = NULL
+      WHERE gateway_id = $1 AND status = 'leased' AND leased_until < now()`, [gatewayId]);
+    const { rows } = await client.query(`SELECT * FROM tasks WHERE gateway_id = $1 AND status = 'queued'
+      ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`, [gatewayId]);
+    const task = rows[0];
+    if (!task) { await client.query('COMMIT'); return null; }
+    await client.query(`UPDATE tasks SET status = 'leased', leased_until = now() + interval '10 minutes' WHERE id = $1`, [task.id]);
+    await client.query('COMMIT');
+    return task;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }
 
 async function migrate() {
@@ -153,28 +199,24 @@ app.post('/v1/tasks', { preHandler: requireConsole }, async (request, reply) => 
      VALUES ($1, $2, 'queued', $3::jsonb, $4, $5)`,
     [id, gatewayId, JSON.stringify({ recipients, message, attachmentUrl: request.body?.attachmentUrl || null }), summary, recipients.length],
   );
+  notifyGateway(gatewayId);
   return reply.code(201).send({ id, status: 'queued', recipientCount: recipients.length, contentSummary: summary });
 });
 
 app.get('/v1/gateway/next-task', async (request, reply) => {
   const gateway = await gatewayFor(request, reply);
   if (!gateway) return;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`UPDATE tasks SET status = 'queued', leased_until = NULL
-      WHERE gateway_id = $1 AND status = 'leased' AND leased_until < now()`, [gateway.id]);
-    const { rows } = await client.query(`SELECT * FROM tasks WHERE gateway_id = $1 AND status = 'queued'
-      ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`, [gateway.id]);
-    const task = rows[0];
-    if (!task) { await client.query('COMMIT'); return reply.code(204).send(); }
-    await client.query(`UPDATE tasks SET status = 'leased', leased_until = now() + interval '10 minutes' WHERE id = $1`, [task.id]);
-    await client.query('COMMIT');
-    return { id: task.id, payload: task.payload, leaseSeconds: 600 };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally { client.release(); }
+  const signal = signalFor(gateway.id);
+  let task = await leaseNextTask(gateway.id);
+  if (!task) {
+    // The Mac keeps one request open for up to 25 seconds.  A newly created
+    // task wakes it immediately, while an idle fleet makes no rapid-fire
+    // polling requests.
+    await waitForTask(gateway.id, signal.sequence);
+    task = await leaseNextTask(gateway.id);
+  }
+  if (!task) return reply.code(204).send();
+  return { id: task.id, payload: task.payload, leaseSeconds: 600 };
 });
 
 app.post('/v1/gateway/tasks/:id/result', async (request, reply) => {
@@ -190,4 +232,5 @@ app.post('/v1/gateway/tasks/:id/result', async (request, reply) => {
 });
 
 await migrate();
+app.addHook('onClose', async () => { await pool.end(); });
 await app.listen({ host: '0.0.0.0', port });
