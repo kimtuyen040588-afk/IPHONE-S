@@ -1,4 +1,5 @@
 node_modules/
+.appium2/
 dist/
 .env
 .env.*
@@ -7,4 +8,5 @@ devices.json
 .wda/
 .scheduler-data/
 static/assets/
+release/
 *.log

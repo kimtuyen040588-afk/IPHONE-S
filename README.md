@@ -1,5 +1,11 @@
 # Phone Farm iOS
 
+## 给普通操作员的 Mac 安装包
+
+不用打开终端。维护者构建并发布 `PhoneFarmGateway-macos-arm64.zip` 后，操作员只需下载、双击并按中文向导完成配置。具体步骤见 [Mac 网关安装包说明](docs/mac-gateway-installer.md)。
+
+首次仍需要在 Apple 官方界面登录开发者账号、在 iPhone 上确认“信任此电脑”并开启开发者模式；这些安全确认不能由本程序代替点击。
+
 An open-source, standalone application for operating physical iOS devices and running scheduled TikTok workflows. It includes guided device registration, WDA/Appium supervision, live video and remote input, PostgreSQL-backed scheduling, recurring jobs, uploads, execution history, the dashboard/API server, and a built-in TikTok automation plugin.
 
 It runs locally as-is; authentication is optional on a loopback bind. Harden it for a shared or exposed deployment by supplying your own `AuthProvider` (`PHONE_FARM_AUTH_PLUGIN`) and process supervision — no fork required. Tasks are persisted as `pluginId`, `taskType`, `taskVersion`, and a JSON payload, so an old schedule can never silently execute a new contract.

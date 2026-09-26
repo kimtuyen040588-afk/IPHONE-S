@@ -1,0 +1,37 @@
+name: Build Mac Gateway
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'gateway-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    # Apple Silicon is required because the released app embeds an arm64 Node runtime.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: test "$(uname -m)" = arm64
+      - run: npm ci
+      - run: npm run appium:install-driver
+      - run: npm run check
+      - run: npm run package:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhoneFarmGateway-macos-arm64
+          path: release/PhoneFarmGateway-macos-arm64.zip
+          if-no-files-found: error
+      # A tagged build becomes a GitHub Release. It is an unsigned test build
+      # unless this repository later adds Developer ID + notarization secrets.
+      - if: startsWith(github.ref, 'refs/tags/gateway-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/PhoneFarmGateway-macos-arm64.zip

@@ -67,6 +67,21 @@ function csrfBlocked(reply: FastifyReply): FastifyReply {
     });
 }
 
+function trustedOrigins(): string[] {
+    return [process.env.PUBLIC_ORIGIN, ...(process.env.PHONE_FARM_TRUSTED_ORIGINS ?? '').split(',')]
+        .map((value) => value?.trim().replace(/\/+$/, '')).filter((value): value is string => Boolean(value));
+}
+
+function hasConsoleToken(request: FastifyRequest): boolean {
+    const expected = process.env.PHONE_FARM_CONSOLE_TOKEN;
+    if (!expected) return true;
+    const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, '');
+    if (!supplied) return false;
+    const expectedBytes = Buffer.from(expected);
+    const suppliedBytes = Buffer.from(supplied);
+    return expectedBytes.length === suppliedBytes.length && crypto.timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
 function escapeHtml(value: unknown): string {
     return String(value ?? '').replace(/[&<>"']/g, (character) => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -110,6 +125,28 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         }
     });
 
+    // A remote console is deliberately opt-in. When its exact origin and a
+    // console token are configured, the browser may call this Mac over a
+    // secure tunnel without opening the API to every website on the internet.
+    app.addHook('onRequest', async (request, reply) => {
+        const origin = request.headers.origin?.replace(/\/+$/, '');
+        const allowed = trustedOrigins();
+        if (origin && allowed.includes(origin)) {
+            reply.header('access-control-allow-origin', origin);
+            reply.header('access-control-allow-headers', 'authorization, content-type');
+            reply.header('access-control-allow-methods', 'GET, HEAD, OPTIONS, POST, PATCH, DELETE');
+            reply.header('vary', 'Origin');
+        }
+        if (request.method === 'OPTIONS') {
+            return origin && allowed.includes(origin)
+                ? reply.code(204).send()
+                : reply.code(403).send({ error: 'This website is not allowed to call the device assistant' });
+        }
+        if (request.url.startsWith('/api/') && !hasConsoleToken(request)) {
+            return reply.code(401).send({ error: 'This Mac requires its private console access code' });
+        }
+    });
+
     // CSRF guard — runs for every deployment, auth or not. The default loopback
     // dashboard is otherwise open to form-encoded POSTs from any page the
     // operator has open in the same browser (tap the phone, stop executions,
@@ -119,8 +156,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         if (request.headers.authorization?.startsWith('Bearer ')) return;
         const origin = request.headers.origin;
         if (!origin) return csrfBlocked(reply);
-        const configured = [process.env.PUBLIC_ORIGIN, ...(process.env.PHONE_FARM_TRUSTED_ORIGINS ?? '').split(',')]
-            .map((value) => value?.trim().replace(/\/+$/, '')).filter((value): value is string => Boolean(value));
+        const configured = trustedOrigins();
         if (configured.length) {
             if (!configured.includes(origin.replace(/\/+$/, ''))) return csrfBlocked(reply);
             return;
@@ -236,6 +272,22 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     })));
     app.get('/api/devices', async () => registeredWithStatus());
     app.get('/api/devices/discovered', async () => discoverConnectedDevices());
+    app.get('/api/assistant/status', async () => {
+        const [registered, discovered] = await Promise.all([loadRegisteredDevices(), discoverConnectedDevices()]);
+        const isSigningConfigured = Boolean(process.env.XCODE_ORG_ID && process.env.XCODE_ORG_ID !== 'replace-me');
+        const nextStep = discovered.length === 0
+            ? '连接并信任 iPhone'
+            : !isSigningConfigured
+                ? '在 Mac 的 Xcode 登录开发者账号'
+                : '开启开发者模式，然后准备设备助手';
+        return {
+            ok: true,
+            discovered: discovered.map(({ name, osVersion, modelName, udid }) => ({ name, osVersion, modelName, udid })),
+            registered: registered.map(({ name, udid, disabled }) => ({ name, udid, disabled: Boolean(disabled) })),
+            signingConfigured: isSigningConfigured,
+            nextStep,
+        };
+    });
     app.get('/api/device-registrations/candidates', async (_request, reply) => {
         if (!options.registrations) return reply.code(503).send({ error: 'Device registration is not configured' });
         return { devices: await options.registrations.candidates() };

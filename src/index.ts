@@ -8,6 +8,10 @@ export * from './registry.js';
 export * from './loader.js';
 export * from './security.js';
 export * from './tiktok-plugin.js';
+export * from './messages-agent-plugin.js';
+export * from './agent/safety.js';
+export * from './agent/planner.js';
+export * from './messages/batch.js';
 export * from './dashboard-theme.js';
 export { activeDevices, loadRegisteredDevices, saveRegisteredDevices } from './devices/registry.js';
 export {
